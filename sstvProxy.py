@@ -1210,10 +1210,149 @@ def averageList(lst):
 			logger.debug("Couldn't convert %s to float" % repr(p))
 	return avg_ping / avg_ping_cnt
 
+class FakeShutdownEvent(object):
+	"""Class to fake a threading.Event.isSet so that users of this module
+	are not required to register their own threading.Event()
+	"""
+
+	@staticmethod
+	def isSet():
+		"Dummy method to always return false"""
+		return False
+
+class HTTPDownloader(threading.Thread):
+	"""Thread class for retrieving a URL"""
+
+	def __init__(self, i, request, start, timeout, opener=None,
+				 shutdown_event=None):
+		threading.Thread.__init__(self)
+		self.request = request
+		self.result = [0]
+		self.starttime = start
+		self.timeout = timeout
+		self.i = i
+		self._opener = urllib.request.urlopen
+		self._shutdown_event = FakeShutdownEvent()
+
+	def run(self):
+		try:
+			if (timeit.default_timer() - self.starttime) <= self.timeout:
+				f = self._opener(self.request)
+				while (not self._shutdown_event.isSet() and
+						(timeit.default_timer() - self.starttime) <=
+						self.timeout):
+					self.result.append(len(f.read(10240)))
+					if self.result[-1] == 0:
+						break
+				f.close()
+		except IOError:
+			pass
+def download():
+	"""Test download speed against speedtest.net"""
+
+	urls = []
+	urls.append('%s/random%sx%s.jpg' % ('speedtest-wellington.telecom.co.nz:8080', 1000, 1000))
+
+	request_count = len(urls)
+	requests = []
+	for i, url in enumerate(urls):
+		requests.append(
+			urllib.request.Request(url)
+		)
+
+
+	def producer(q, requests, request_count):
+		for i, request in enumerate(requests):
+			thread = HTTPDownloader(
+				i,
+				request,
+				start,
+				1000,
+				opener=urllib.request.urlopen,
+				shutdown_event=FakeShutdownEvent()
+			)
+			thread.start()
+			q.put(thread, True)
+			# callback(i, request_count, start=True)
+
+	finished = []
+
+	def consumer(q, request_count):
+		while len(finished) < request_count:
+			thread = q.get(True)
+			while thread.isAlive():
+				thread.join(timeout=0.1)
+			finished.append(sum(thread.result))
+			# callback(thread.i, request_count, end=True)
+
+
+	import queue
+	q = queue.Queue(2)
+	prod_thread = threading.Thread(target=producer,
+								   args=(q, requests, request_count))
+	cons_thread = threading.Thread(target=consumer,
+								   args=(q, request_count))
+	start = timeit.default_timer()
+	prod_thread.start()
+	cons_thread.start()
+	while prod_thread.isAlive():
+		prod_thread.join(timeout=0.1)
+	while cons_thread.isAlive():
+		cons_thread.join(timeout=0.1)
+
+	stop = timeit.default_timer()
+	bytes_received = sum(finished)
+	dl = (
+		(bytes_received / (stop - start)) * 8.0
+	)
+	if dl > 100000:
+		ul = 8
+	return dl
+
+def testBandwidth():
+	import sys, time, timeit, socket
+	from socket import AF_INET, SOCK_STREAM
+
+	BUFSIZE = 13107200
+	count = 100
+	host = "https://dsg.SmoothStreams.tv:443"
+
+	testdata = 'x' * (BUFSIZE - 1) + '\n'
+	t1 = time.time()
+	s = socket.socket(AF_INET, SOCK_STREAM)
+	# requests.urlretrieve('http://speedtest-wellington.telecom.co.nz:8080/random1000x1000.jpg')
+	t2 = time.time()
+	# s.connect(('auckland.speedtest.vodafone.co.nz', 8080))
+	s.connect(('speedtest.ftp.otenet.gr', 80))
+	t3 = time.time()
+	response = "GET /files/test100Mb.db HTTP/1.1\r\n"
+	response += 'Cache-Control: no-cache\r\n\r\n'
+	# response = "GET /random4000x4000.jpg HTTP/1.1\r\n\r\n"
+	s.sendall(response.encode())
+
+	# s.shutdown(1)  # Send EOF
+	t4 = time.time()
+	import select
+
+	# s.setblocking(0)
+
+	# ready = select.select([s], [], [], 10)
+	# if ready[0]:
+	data = s.recv(BUFSIZE)
+		# count+=1
+	s.shutdown(1)
+	t5 = time.time()
+	print('Raw timers:', t1, t2, t3, t4, t5)
+	print('Intervals:', t2 - t1, t3 - t2, t4 - t3, t5 - t4)
+	print('Total:', t5 - t1)
+	print('Size:', (BUFSIZE * count * 0.001))
+	print('Throughput:', round((BUFSIZE * count * 0.001) / (t5 - t1), 3),'K/sec.')
+
 def testServers(update_settings=True):
 	# todo
 	global SRVR, SRVR_SPARE, AUTO_SERVER
 	service = SRVR
+
 
 	res = None
 	res_host = None
@@ -3090,6 +3229,7 @@ if __name__ == "__main__":
 		thread.start_new_thread(thread_playlist, ())
 	except:
 		_thread.start_new_thread(thread_playlist, ())
+	testBandwidth()
 	if AUTO_SERVER: testServers()
 	print("\n\n##############################################################")
 	print("Main Menu - %s/index.html" % urljoin(SERVER_HOST, SERVER_PATH))
